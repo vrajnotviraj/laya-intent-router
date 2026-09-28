@@ -5,7 +5,7 @@ A small zero-shot intent detection model with out-of-scope detection. You give i
 No training and no labelled data on your side. You write the intents when you call it, and you can change them on every request. It runs on a CPU with `onnxruntime` in about 150 ms (160 ms p95 on 4 threads), no GPU and no torch.
 
 - **Model on Hugging Face:** [vrajnotviraj/laya-intent-router-150m-onnx](https://huggingface.co/vrajnotviraj/laya-intent-router-150m-onnx)
-- **This repo:** the 1-file inference code (`router.py`) and the full training pipeline (`training/`)
+- **This repo:** the 1-file inference code (`laya_intent_router.py`) and the full training pipeline (`training/`)
 
 ```
 "i want to cancel my order 88213"         -> cancel_order     0.97
@@ -23,15 +23,15 @@ That last line is why I built it. The original [Laya](https://huggingface.co/con
 git clone https://github.com/vrajnotviraj/laya-intent-router
 cd laya-intent-router
 pip install onnxruntime tokenizers numpy huggingface_hub
-python router.py "where is my parcel"      # downloads ~440 MB of weights once
+python laya_intent_router.py "where is my parcel"      # downloads ~440 MB of weights once
 ```
 
 In your own code:
 
 ```python
-from router import Router
+from laya_intent_router import LayaIntentRouter
 
-r = Router.from_pretrained()
+r = LayaIntentRouter.from_pretrained()
 
 intents = {
     "check_balance":  ["What's my account balance"],

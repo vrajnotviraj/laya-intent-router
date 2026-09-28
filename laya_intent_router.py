@@ -1,7 +1,7 @@
 """Zero-shot intent router: pick which of your paths a message belongs to, or none of them.
 
-    from router import Router
-    r = Router.from_pretrained()          # or Router("path/to/local/dir")
+    from laya_intent_router import LayaIntentRouter
+    r = LayaIntentRouter.from_pretrained()          # or LayaIntentRouter("path/to/local/dir")
     r.route("i want to cancel my order 88213", {
         "order_status": ["Customer wants to know where their order is"],
         "cancel_order": ["Customer wants to cancel an existing order"],
@@ -99,7 +99,7 @@ class Shortlist:
         return {p: t for j, (p, t) in enumerate(paths.items()) if j in keep}
 
 
-class Router:
+class LayaIntentRouter:
     def __init__(self, model_dir, threads=4, shortlist_k=4):
         from tokenizers import Tokenizer
 
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     import sys
 
     here = os.path.dirname(os.path.abspath(__file__))
-    r = Router(here) if os.path.exists(os.path.join(here, "laya.onnx")) else Router.from_pretrained()
+    r = LayaIntentRouter(here) if os.path.exists(os.path.join(here, "laya.onnx")) else LayaIntentRouter.from_pretrained()
     paths = {
         "order_status": ["Customer wants to know the status or location of their order"],
         "cancel_order": ["Customer wants to cancel an existing order"],
