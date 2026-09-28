@@ -1,0 +1,13 @@
+# Tested with Python 3.12 and the versions below.
+torch==2.14.0
+transformers==5.17.0
+tokenizers==0.23.2
+safetensors==0.8.0
+huggingface_hub==1.33.0
+numpy==2.5.3
+onnx==1.23.0
+onnxruntime==1.30.0
+pandas==3.0.6    # public_data.py
+pyarrow==25.0.1   # public_data.py reads parquet
+# train.py imports laya (model builder, calibration helpers). Pinned to the commit this was trained with.
+laya @ git+https://github.com/NandhaKishorM/laya@4066d5d5fbf08b66c6757ddeedbd797bd7655bc0
