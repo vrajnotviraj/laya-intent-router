@@ -9,12 +9,17 @@
     # {'match': 'cancel_order', 'score': 0.97, 'probabilities': {...}}
 
 Needs: pip install onnxruntime tokenizers numpy huggingface_hub
+On Apple Silicon, `pip install mlx` as well and the model runs on the GPU with backend="mlx" or "auto";
+laya_intent_router_mlx.py has the MLX code). The default is backend="onnx" (CPU), which never downloads mlx/.
 """
 
 import hashlib
 import json
+import importlib.util
 import os
+import platform
 import re
+import sys
 from collections import OrderedDict
 
 import numpy as np
@@ -30,6 +35,9 @@ HISTORY_HINT = (
 )
 NO_MATCH_DESCRIPTION = "Gibberish, filler words, or a message unrelated to every other path."
 NONE = "__none__"
+BACKENDS = ("auto", "onnx", "mlx")
+SHARED_FILES = ["tokenizer.json", "rl_agent_config.json", "shortlist/*"]
+BACKEND_FILES = {"onnx": ["laya.onnx"], "mlx": ["mlx/*", "laya_intent_router_mlx.py"]}
 OPTION_CAP, MIN_HEAD_TOKENS, PHRASING_SEP = 96, 16, '" | "'
 
 
@@ -51,6 +59,32 @@ def _water_fill(lengths, budget, floor=4):
 def _humanise(path_id):
     s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", path_id)
     return re.sub(r"[_\-.:/]+", " ", s).strip().lower()
+
+
+def _mlx_available():
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core as mx
+
+        return bool(mx.metal.is_available())  # False in macOS VMs / CI runners without a Metal GPU
+    except Exception:
+        return False
+
+
+def _has_mlx_weights(model_dir):
+    return os.path.exists(os.path.join(model_dir, "mlx", "model.safetensors"))
+
+
+def _mlx_session(model_dir):
+    for d in (os.path.dirname(os.path.abspath(__file__)), model_dir):  # next to this file, else the downloaded copy
+        f = os.path.join(d, "laya_intent_router_mlx.py")
+        if os.path.exists(f):
+            spec = importlib.util.spec_from_file_location("laya_intent_router_mlx", f)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod.Session(os.path.join(model_dir, "mlx"))
+    raise FileNotFoundError("laya_intent_router_mlx.py not found next to laya_intent_router.py or in " + model_dir)
 
 
 def _session(path, threads):
@@ -100,13 +134,21 @@ class Shortlist:
 
 
 class LayaIntentRouter:
-    def __init__(self, model_dir, threads=4, shortlist_k=4):
+    def __init__(self, model_dir, threads=4, shortlist_k=4, backend="onnx"):
+        """backend: "onnx" (CPU, default), "mlx" (Apple GPU) or "auto" (mlx on Apple Silicon when mlx is installed
+        and mlx/ weights are present, onnx otherwise). The chosen one is in self.backend."""
         from tokenizers import Tokenizer
+
+        if backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}, got {backend!r}")
+        if backend == "auto":
+            backend = "mlx" if _has_mlx_weights(model_dir) and _mlx_available() else "onnx"
 
         self.cfg = json.load(open(os.path.join(model_dir, "rl_agent_config.json")))
         self.tok = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
         self.cls, self.sep, self.mask = (self.tok.token_to_id(t) for t in ("[CLS]", "[SEP]", "[MASK]"))
-        self.sess = _session(os.path.join(model_dir, "laya.onnx"), threads)
+        self.backend = backend
+        self.sess = _mlx_session(model_dir) if backend == "mlx" else _session(os.path.join(model_dir, "laya.onnx"), threads)
         self.threshold = self.cfg.get("match_threshold", 0.625)
         self.temps = self.cfg["temperature_by_options"]
         sl_dir = os.path.join(model_dir, "shortlist")
@@ -114,10 +156,21 @@ class LayaIntentRouter:
         self.shortlist = Shortlist(sl_dir, threads) if self.k else None
 
     @classmethod
-    def from_pretrained(cls, repo_id=REPO_ID, **kw):
+    def from_pretrained(cls, repo_id=REPO_ID, backend="onnx", **kw):
+        """Downloads only what the backend needs: ONNX never fetches mlx/, MLX never fetches laya.onnx."""
         from huggingface_hub import snapshot_download
 
-        return cls(snapshot_download(repo_id), **kw)
+        if backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}, got {backend!r}")
+        if backend == "auto":
+            if _mlx_available():
+                d = snapshot_download(repo_id, allow_patterns=SHARED_FILES + BACKEND_FILES["mlx"])
+                if _has_mlx_weights(d):
+                    return cls(d, backend="mlx", **kw)
+            backend = "onnx"
+        if backend == "mlx" and not _mlx_available():  # fail before downloading 328 MB we can't use
+            raise ImportError('backend="mlx" needs Apple Silicon and `pip install mlx`')
+        return cls(snapshot_download(repo_id, allow_patterns=SHARED_FILES + BACKEND_FILES[backend]), backend=backend, **kw)
 
     def _tokens(self, text):
         return self.tok.encode(text.replace("[MASK]", " "), add_special_tokens=False)
@@ -189,8 +242,6 @@ class LayaIntentRouter:
 
 
 if __name__ == "__main__":
-    import sys
-
     here = os.path.dirname(os.path.abspath(__file__))
     r = LayaIntentRouter(here) if os.path.exists(os.path.join(here, "laya.onnx")) else LayaIntentRouter.from_pretrained()
     paths = {
@@ -199,6 +250,7 @@ if __name__ == "__main__":
         "return_order": ["Customer wants to return an order"],
         "wrong_item": ["Customer received an item different from what they ordered"],
     }
+    print(f"backend: {r.backend}")
     for msg in sys.argv[1:] or ["where is my parcel #A-7721", "qwewqeqw", "i got blue shoes but ordered black"]:
         out = r.route(msg, paths)
         print(f"{msg!r:45} -> {out['match']} ({out['score']:.2f})")

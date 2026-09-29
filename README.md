@@ -1,11 +1,11 @@
-# Laya intent router: zero-shot intent classification on CPU
+# Laya intent router: zero-shot intent classification on CPU and Apple Silicon
 
 A small zero-shot intent detection model with out-of-scope detection. You give it a user message and a list of intents written in plain English, and it tells you which intent the message belongs to, or that it fits none of them.
 
-No training and no labelled data on your side. You write the intents when you call it, and you can change them on every request. It runs on a CPU with `onnxruntime` in about 150 ms (160 ms p95 on 4 threads), no GPU and no torch.
+No training and no labelled data on your side. You write the intents when you call it, and you can change them on every request. It runs on a CPU with `onnxruntime` in about 150 ms (160 ms p95 on 4 threads), no GPU and no torch. On an Apple Silicon Mac, an optional MLX backend runs the same model on the GPU in about 15 to 25 ms.
 
 - **Model on Hugging Face:** [vrajnotviraj/laya-intent-router-150m-onnx](https://huggingface.co/vrajnotviraj/laya-intent-router-150m-onnx)
-- **This repo:** the 1-file inference code (`laya_intent_router.py`) and the full training pipeline (`training/`)
+- **This repo:** the inference code (`laya_intent_router.py`, plus `laya_intent_router_mlx.py` for the optional Apple Silicon backend) and the full training pipeline (`training/`)
 
 ```
 "i want to cancel my order 88213"         -> cancel_order     0.97
@@ -49,6 +49,37 @@ r.route("ok", intents)
 
 Each intent is a key plus 1 or more example phrasings or a short description. `match` is `None` when the message fits nothing, or when the best score is under the threshold (0.625 by default; pass `threshold=` to change it).
 
+## Faster on a Mac: MLX backend
+
+On Apple Silicon the same model can run on the GPU through [MLX](https://github.com/ml-explore/mlx). Install `mlx` next to the usual packages and pass `backend="mlx"` or `backend="auto"`:
+
+```bash
+pip install onnxruntime tokenizers numpy huggingface_hub mlx
+```
+
+```python
+r = LayaIntentRouter.from_pretrained(backend="auto")   # MLX if it can, ONNX if not
+r.backend                                              # 'mlx'
+LayaIntentRouter.from_pretrained(backend="mlx")      # force MLX, errors out if mlx is missing
+LayaIntentRouter.from_pretrained()                   # default: ONNX on CPU, never downloads mlx/
+```
+
+The default is ONNX, so nothing changes unless you ask for MLX. `auto` only picks MLX on an Apple Silicon Mac with `mlx` importable and the `mlx/` weights in the repo. Everywhere else (Linux, Windows, Intel Macs, or a Mac without `mlx`) it runs ONNX on CPU, same as before. Each backend downloads only its own weights, so ONNX users never pull the 328 MB `mlx/` folder and MLX users never pull `laya.onnx`. `mlx` is optional and never required.
+
+One catch: a copy of `laya_intent_router.py` from before September 29, 2026 downloads the whole repo, `mlx/` included. Grab the current file to skip that.
+
+The MLX weights are converted from the same trained checkpoint as `laya.onnx` (fp16, with the Linear layers quantized to 8 bits at load). On 5,000 dev routing episodes they made the same match-or-none decision as the ONNX model 99.7% of the time, and accuracy and out-of-scope recall were within 0.001. The few that differ sit right on the 0.625 threshold, where ONNX's own int8 rounding tips them one way or the other.
+
+Latency on an M2 Pro, 1 message at a time, warm, whole `route()` call including the shortlist (p50 / p95, 300 calls each):
+
+| intents | ONNX, 4 CPU threads | MLX (M2 Pro GPU) |
+|---|---|---|
+| 2 | 66 / 107 ms | 15 / 22 ms |
+| 7 | 107 / 213 ms | 24 / 37 ms |
+| 20 | 150 / 219 ms | 28 / 38 ms |
+
+So about 4 to 5x faster. The machine was busy during these runs (ONNX p95 is 160 ms on a quiet one), so treat the p95s as upper bounds and compare the columns with each other. It doesn't get under 10 ms: the cost is 22 encoder layers over a ~225-token prompt, and dropping from fp32 to fp16 or 8-bit saves at most about 8 ms. I've only measured an M2 Pro.
+
 ## What it's good for
 
 - Chatbot and voicebot intent routing, where the list of intents changes per flow or per customer.
@@ -91,6 +122,14 @@ Everything trained locally on a 32 GB M2 Pro. The code for every step is in [`tr
 - **It only knows what your phrasings say.** "My card was stolen" won't hit a `block_card` intent whose only phrasing is "Block my card". Add 2 or 3 phrasings that match how people actually talk.
 - **Indirect requests and heavy typos** are the weakest slices (about 0.83 to 0.86).
 - My test messages were written by the same process as the synthetic training data. Real user logs might be harder, so run your own messages through it before trusting the numbers.
+
+## FAQ
+
+**Can I run it in Ollama or LM Studio?**
+
+No, and I don't think it's possible without breaking the model. Ollama and LM Studio run GGUF files through llama.cpp, which is built for text generation and plain embeddings. This model isn't either of those. After the encoder it has a small decision head: 2 extra transformer layers, a scorer that reads one position per intent (the `[MASK]` in front of each one) and a temperature per menu size. GGUF has nowhere to put that head, and llama.cpp has no way to run it. You'd get an embedding model and lose the part that says "none of these".
+
+If you want it local and fast on a Mac, use the MLX backend above. It runs the whole graph, head included, in-process.
 
 ## License
 
